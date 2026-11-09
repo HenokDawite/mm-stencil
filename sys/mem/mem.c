@@ -33,6 +33,7 @@ int mem_init()
         fprintf(stderr, "Could not allocate memory\n");
         return -1;
     }
+    mem_size = size;
 
     return 0;
 }
