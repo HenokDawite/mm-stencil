@@ -126,7 +126,6 @@ static int test_three(void){
         return 8;
     }
 
-
     return 0;
 
 }
