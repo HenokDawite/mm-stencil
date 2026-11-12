@@ -20,8 +20,6 @@ void *slab_obj_alloc(slab_allocator_t allocator);
 
 void slab_obj_free(slab_allocator_t allocator, void *obj);
 
-void *page_alloc_n(int npages);
 
-void page_free_n(void *ptr, int npages);
 
 #endif // __SLAB_ALLOCATOR_H__

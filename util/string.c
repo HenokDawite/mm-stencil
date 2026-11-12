@@ -13,8 +13,8 @@ int strlen(const char *str) {
     return len;
 }
 
-void memset(void *p, char byte, long size) {
-    for (int i = 0; i < size; i++) {
-        p = byte;
-    }
-}
+// void memset(void *p, char byte, long size) {
+//     for (int i = 0; i < size; i++) {
+//         p = *byte;
+//     }
+// }

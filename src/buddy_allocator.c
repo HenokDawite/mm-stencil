@@ -8,9 +8,14 @@
 // 4K, 8K, 16K, 32K, 64K
 #define NUM_ORDERS 5
 
+#define MAX_ORDER        (NUM_ORDERS - 1)
+#define MAX_ORDER_PAGES  (1 << MAX_ORDER)   
+
+
+
 // round up to a chunk. if we land exactly on a size, step up so
 // theres a little extra room in the block
-static int order_for_size(long size)
+static int order_for_byte_size(long size)
 {
     int order = 0;
     long bytes = PAGE_SIZE;
@@ -24,6 +29,20 @@ static int order_for_size(long size)
     }
     return order;
 }
+
+static int order_for_page_size(long npages)
+{
+    int order = 0;
+
+    while ((1 << order) <npages) {
+        if (order + 1 >= NUM_ORDERS) {
+            break;
+        }
+        order++;
+    }
+    return order;
+}
+
 
 // all_chunks holds descriptors nobody is using right now
 static chunk_t *grab_chunk()
@@ -88,7 +107,101 @@ static chunk_t *pull_chunk(int order, void *addr)
     }
     return NULL;
 }
+//helper function to merge free blocks next to each other (help with freeing) 
+static void free_order(void *addr, int order)
+{
+    chunk_t *c;
 
+    while (order < MAX_ORDER) {
+        long bytes = (long)PAGE_SIZE << order;
+        chunk_t *buddy = pull_chunk(order, (char *)addr + bytes);
+
+        if (buddy == NULL) {
+            break;
+        }
+        drop_chunk(buddy);
+        order++;
+    }
+    c = grab_chunk();
+    c->addr = addr;
+    push_chunk(order, c);
+}
+
+//helper function check if a chunk is free 
+static int is_free(int order, void *addr)
+{
+    chunk_t *cur = free_list->lists[order];
+
+    while (cur != NULL) {
+        if (cur->addr == addr) {
+            return 1;
+        }
+        cur = cur->next;
+    }
+    return 0;
+}
+
+
+//helper function to free if num pages larger than max chunk size 
+static void free_large(void *ptr, int npages)
+{
+    long block_bytes = (long)PAGE_SIZE << MAX_ORDER;
+    int full = npages / MAX_ORDER_PAGES;
+    int rem  = npages % MAX_ORDER_PAGES;
+    int i;
+
+    for (i = 0; i < full; i++) {
+        free_order((char *)ptr + i * block_bytes, MAX_ORDER);
+    }
+    if (rem) {
+        free_order((char *)ptr + full * block_bytes, order_for_page_size(rem));
+    }
+}
+
+//helper func to allocate if num pages larger than biggest chunk 
+static void *alloc_large(int npages)
+{
+    long block_bytes = (long)PAGE_SIZE << MAX_ORDER;
+    int full = npages / MAX_ORDER_PAGES;
+    int rem  = npages % MAX_ORDER_PAGES;
+    int n    = full + (rem ? 1 : 0);
+    chunk_t *start;
+
+    for (start = free_list->lists[MAX_ORDER]; start != NULL; start = start->next) {
+        char *base = (char *)start->addr;
+        int i;
+
+        // all n consecutive 64K blocks must be free
+        for (i = 1; i < n; i++) {
+            if (!is_free(MAX_ORDER, base + i * block_bytes)) {
+                break;
+            }
+        }
+        if (i < n) {
+            continue;
+        }
+
+
+        for (i = 0; i < n; i++) {
+            drop_chunk(pull_chunk(MAX_ORDER, base + i * block_bytes));
+        }
+
+        // trim the tail: keep only what rem needs, return the rest
+        if (rem) {
+            char *tail = base + full * block_bytes;
+            int keep = order_for_page_size(rem);
+            int o;
+
+            for (o = keep; o < MAX_ORDER; o++) {
+                chunk_t *c = grab_chunk();
+                c->addr = tail + ((long)PAGE_SIZE << o);
+                push_chunk(o, c);
+            }
+        }
+        return base;
+    }
+    return NULL;
+}
 
 void buddy_init()
 {
@@ -176,7 +289,7 @@ void *buddy_obj_alloc(long size)
         return NULL;
     }
 
-    order = order_for_size(size);
+    order = order_for_byte_size(size);
     cur = order;
     while (cur < NUM_ORDERS && free_list->lists[cur] == NULL) {
         cur++;
@@ -216,7 +329,7 @@ void buddy_obj_free(long size, void *obj)
         return;
     }
 
-    order = order_for_size(size);
+    order = order_for_byte_size(size);
     addr = obj;
 
     // buddy sits right after this block. if its free, fold them together
@@ -247,7 +360,41 @@ void buddy_obj_free(long size, void *obj)
  *       npages is larger than MAX_CHUNK_SIZE?
  */
 void *page_alloc_n(int npages) {
-    return NULL;
+    int order;
+    int cur;
+    chunk_t *block;
+    void *addr;
+
+    if (npages <= 0 || free_list == NULL) {
+        return NULL;
+    }
+    if (npages > (MAX_CHUNK_SIZE/ PAGE_SIZE)) {
+        return alloc_large(npages);
+    }
+    order = order_for_page_size(npages);
+    cur = order;
+    while (cur < NUM_ORDERS && free_list->lists[cur] == NULL) {
+        cur++;
+    }
+    if (cur == NUM_ORDERS) {
+        return NULL;
+    }
+
+    block = pop_chunk(cur);
+    while (cur > order) {
+        chunk_t *buddy;
+        long half;
+
+        cur--;
+        half = (long)PAGE_SIZE << cur;
+        buddy = grab_chunk();
+        buddy->addr = (char *)block->addr + half;
+        push_chunk(cur, buddy);
+    }
+
+    addr = block->addr;
+    drop_chunk(block);
+    return addr;
 }
 
 /*
@@ -256,5 +403,33 @@ void *page_alloc_n(int npages) {
  * Hint: this function should handle the inverse case of the "alloc" function!
  */
 void page_free_n(void *ptr, int npages) {
+    int order;
+    void *addr;
+    chunk_t *c;
 
+    if (ptr == NULL || npages <= 0 || free_list == NULL) {
+        return;
+    }
+    if (npages > (MAX_CHUNK_SIZE / PAGE_SIZE)) {
+        free_large(ptr, npages);
+        return;
+    }
+
+    order = order_for_page_size(npages);
+    addr = ptr;
+
+    while (order < NUM_ORDERS - 1) {
+        long bytes = (long)PAGE_SIZE << order;
+        chunk_t *buddy = pull_chunk(order, (char *)addr + bytes);
+
+        if (buddy == NULL) {
+            break;
+        }
+        drop_chunk(buddy);
+        order++;
+    }
+
+    c = grab_chunk();
+    c->addr = addr;
+    push_chunk(order, c);
 }
